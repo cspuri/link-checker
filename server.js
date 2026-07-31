@@ -122,13 +122,23 @@ async function processPage(job, pageUrl, csvStream) {
 
   const $ = cheerio.load(pageRes.data);
   for (const sel of EXCLUDE_SELECTORS) $(sel).remove();
-  const scope = CONTENT_SELECTOR ? $(CONTENT_SELECTOR) : $("body");
+
+  // Try the article-page content container first. Some helpx pages (like
+  // product landing/hub pages) use a different template and won't have
+  // this container at all -- in that case, fall back to the whole body
+  // (with TOC/nav already stripped out above).
+  let scope = CONTENT_SELECTOR ? $(CONTENT_SELECTOR) : $("body");
+  let usedFallback = false;
+  if (CONTENT_SELECTOR && scope.length === 0) {
+    scope = $("body");
+    usedFallback = true;
+  }
 
   const rawHrefs = [];
   scope.find("a[href]").each((_, el) => rawHrefs.push($(el).attr("href")));
   const links = [...new Set(rawHrefs.map((h) => resolveUrl(pageUrl, h)).filter(isCheckableLink))];
 
-  log(job, `  Found ${links.length} links. Checking...`);
+  log(job, `  Found ${links.length} links${usedFallback ? " (used body fallback -- content container not found on this page template)" : ""}. Checking...`);
 
   const limit = pLimit(LINK_CONCURRENCY);
   const results = await Promise.all(links.map((l) => limit(() => checkLinkStatus(l))));
