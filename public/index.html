@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Link Checker</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262b38;
+    --text: #e6e9f0;
+    --muted: #8b93a7;
+    --accent: #4f8cff;
+    --ok: #3ecf8e;
+    --broken: #ff5d5d;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 28px 32px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  header p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 28px 32px 60px;
+    display: grid;
+    gap: 20px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  textarea {
+    width: 100%;
+    min-height: 140px;
+    resize: vertical;
+    background: #0c0e13;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  textarea:focus, button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled {
+    background: #33394a;
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .hint { color: var(--muted); font-size: 12px; }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .stat {
+    background: #0c0e13;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    text-align: center;
+  }
+  .stat .num { font-size: 22px; font-weight: 700; font-family: var(--mono); }
+  .stat .label { font-size: 11px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat.broken .num { color: var(--broken); }
+  .stat.ok .num { color: var(--ok); }
+  .progress-bar {
+    height: 8px;
+    background: #0c0e13;
+    border-radius: 5px;
+    overflow: hidden;
+    margin-top: 12px;
+    border: 1px solid var(--border);
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.3s ease;
+  }
+  #log {
+    background: #0c0e13;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+    max-height: 340px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .badge.running { background: rgba(79,140,255,0.15); color: var(--accent); }
+  .badge.done { background: rgba(62,207,142,0.15); color: var(--ok); }
+  .badge.error { background: rgba(255,93,93,0.15); color: var(--broken); }
+  .status-line { display: flex; align-items: center; gap: 10px; }
+  #downloadBtn { display: none; }
+  #errorMsg { color: var(--broken); font-size: 13px; margin-top: 10px; display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Link Checker</h1>
+  <p>Paste helpx page URLs below (one per line). Checks links inside the article content only — excludes the TOC.</p>
+</header>
+
+<main>
+  <div class="panel">
+    <label for="urls">Page URLs</label>
+    <textarea id="urls" placeholder="https://helpx.adobe.com/illustrator/desktop/new-features/whats-new.html
+https://helpx.adobe.com/illustrator/desktop/new-features/release-notes.html
+..."></textarea>
+    <div class="row">
+      <span class="hint">One URL per line. Lines starting with # are ignored.</span>
+      <div style="display:flex; gap:10px;">
+        <button id="runBtn" onclick="startRun()">Run check</button>
+        <button id="downloadBtn" class="secondary" onclick="download()">Download CSV</button>
+      </div>
+    </div>
+    <div id="errorMsg"></div>
+  </div>
+
+  <div class="panel" id="progressPanel" style="display:none;">
+    <div class="status-line">
+      <span class="badge" id="statusBadge">queued</span>
+      <span class="hint" id="progressText"></span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+
+    <div class="stats" style="margin-top:18px;">
+      <div class="stat"><div class="num" id="statPages">0/0</div><div class="label">Pages</div></div>
+      <div class="stat"><div class="num" id="statLinks">0</div><div class="label">Links checked</div></div>
+      <div class="stat broken"><div class="num" id="statBroken">0</div><div class="label">Broken found</div></div>
+      <div class="stat ok"><div class="num" id="statRate">0%</div><div class="label">Progress</div></div>
+    </div>
+  </div>
+
+  <div class="panel" id="logPanel" style="display:none;">
+    <label>Live log</label>
+    <div id="log"></div>
+  </div>
+</main>
+
+<script>
+let currentJobId = null;
+let pollTimer = null;
+
+async function safeJson(res) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      "Server didn't return JSON (got: " + text.slice(0, 80) + "…). " +
+      "This usually means you're hitting the wrong port, or the server crashed — check the terminal."
+    );
+  }
+}
+
+async function startRun() {
+  const urls = document.getElementById('urls').value;
+  const errorEl = document.getElementById('errorMsg');
+  errorEl.style.display = 'none';
+
+  const runBtn = document.getElementById('runBtn');
+  runBtn.disabled = true;
+  runBtn.textContent = 'Starting…';
+
+  try {
+    const res = await fetch('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls })
+    });
+    const data = await safeJson(res);
+
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Something went wrong.';
+      errorEl.style.display = 'block';
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run check';
+      return;
+    }
+
+    currentJobId = data.jobId;
+    document.getElementById('progressPanel').style.display = 'block';
+    document.getElementById('logPanel').style.display = 'block';
+    document.getElementById('downloadBtn').style.display = 'none';
+    document.getElementById('log').textContent = '';
+
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollStatus, 1200);
+    pollStatus();
+  } catch (err) {
+    errorEl.textContent = 'Failed to reach the server: ' + err.message;
+    errorEl.style.display = 'block';
+    runBtn.disabled = false;
+    runBtn.textContent = 'Run check';
+  }
+}
+
+async function pollStatus() {
+  if (!currentJobId) return;
+  const res = await fetch('/api/status/' + currentJobId);
+  if (!res.ok) return;
+  const job = await safeJson(res).catch(() => null);
+  if (!job) return;
+
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = job.status;
+  badge.className = 'badge ' + job.status;
+
+  const pct = job.totalPages ? Math.round((job.donePages / job.totalPages) * 100) : 0;
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressText').textContent = `${job.donePages} of ${job.totalPages} pages processed`;
+  document.getElementById('statPages').textContent = `${job.donePages}/${job.totalPages}`;
+  document.getElementById('statLinks').textContent = job.totalChecked;
+  document.getElementById('statBroken').textContent = job.totalBroken;
+  document.getElementById('statRate').textContent = pct + '%';
+
+  const logEl = document.getElementById('log');
+  logEl.textContent = job.log.join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+
+  if (job.status === 'done' || job.status === 'error') {
+    clearInterval(pollTimer);
+    const runBtn = document.getElementById('runBtn');
+    runBtn.disabled = false;
+    runBtn.textContent = 'Run check';
+    if (job.status === 'done') {
+      document.getElementById('downloadBtn').style.display = 'inline-block';
+    }
+  }
+}
+
+function download() {
+  if (!currentJobId) return;
+  window.location.href = '/api/download/' + currentJobId;
+}
+</script>
+
+</body>
+</html>
