@@ -183,6 +183,7 @@ https://helpx.adobe.com/illustrator/desktop/new-features/release-notes.html
       <div style="display:flex; gap:10px;">
         <button id="runBtn" onclick="startRun()">Run check</button>
         <button id="downloadBtn" class="secondary" onclick="download()">Download CSV</button>
+        <button id="resetBtn" class="secondary" onclick="resetJobs()">Reset</button>
       </div>
     </div>
     <div id="errorMsg"></div>
@@ -306,6 +307,28 @@ async function pollStatus() {
 function download() {
   if (!currentJobId) return;
   window.location.href = '/api/download/' + currentJobId;
+}
+
+async function resetJobs() {
+  const resetBtn = document.getElementById('resetBtn');
+  resetBtn.disabled = true;
+  resetBtn.textContent = 'Resetting…';
+  try {
+    const res = await fetch('/api/reset', { method: 'POST' });
+    await safeJson(res);
+    if (pollTimer) clearInterval(pollTimer);
+    const runBtn = document.getElementById('runBtn');
+    runBtn.disabled = false;
+    runBtn.textContent = 'Run check';
+    document.getElementById('errorMsg').style.display = 'none';
+  } catch (err) {
+    const errorEl = document.getElementById('errorMsg');
+    errorEl.textContent = 'Reset failed: ' + err.message;
+    errorEl.style.display = 'block';
+  } finally {
+    resetBtn.disabled = false;
+    resetBtn.textContent = 'Reset';
+  }
 }
 </script>
 
