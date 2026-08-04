@@ -24,43 +24,15 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = process.env.PORT || 3000;
 
-// ---- Crawl config ----
+// ---- Crawl config (kept simple and fast -- no retries, no per-host throttling) ----
 const PAGE_CONCURRENCY = 8;
 const LINK_CONCURRENCY = 12;
-const PER_HOST_CONCURRENCY = 4; // avoid extreme bursts to one domain, but don't over-throttle
-const TIMEOUT_MS = 12000;
-const RETRY_DELAYS_MS = []; // no retries -- if a site blocks bots, retrying just re-triggers the same block, slower for no benefit
+const TIMEOUT_MS = 15000;
+const USER_AGENT = "Mozilla/5.0 (compatible; BrokenLinkChecker/1.0)";
 
-// Headers for fetching the source (helpx) pages themselves. Keep this simple
-// and plain -- helpx.adobe.com is behind Akamai bot-protection, and a header
-// set that CLAIMS to be a full modern Chrome browser (without matching
-// Chrome's actual network/TLS fingerprint) can get flagged as suspicious and
-// silently stalled rather than served, which shows up as a timeout.
-const PAGE_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (compatible; BrokenLinkChecker/1.0)",
-};
-
-// Headers used only when checking the DESTINATION links found on those pages
-// (third-party sites like stock.adobe.com, Zendesk help centers, gov/edu
-// portals, etc). Looking more like a real browser here genuinely helps pass
-// basic bot-filtering on many of those sites, and doesn't carry the same risk
-// since we're not relying on this to fetch the actual article content.
-const LINK_CHECK_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-};
-
-// Confirmed-broken: the server explicitly says the resource is gone/invalid.
-// These are reliable, no ambiguity.
-const BROKEN_CODES = [400, 404, 405, 410];
-
-// Needs-review: could be a real problem OR bot-protection blocking an
-// automated request (very common for Cloudflare/Akamai-protected sites,
-// gov/edu portals, Zendesk help centers, stock.adobe.com, etc). We flag
-// these separately instead of calling them definitively broken.
-const REVIEW_CODES = [401, 403, 429, 500, 502, 503];
+// Anything in this list of status codes (or a network-level ERROR) is
+// reported as broken. No further categorization -- simple and fast.
+const BROKEN_CODES = [400, 401, 403, 404, 405, 410, 500, 502, 503, 504];
 
 // Confirmed from actual helpx.adobe.com page markup.
 const CONTENT_SELECTOR = "#helpxNext-article-right-rail";
@@ -93,22 +65,18 @@ function isCheckableLink(url) {
   return /^https?:\/\//i.test(url);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function checkLinkStatusOnce(url) {
+async function checkLinkStatus(url) {
   try {
     let res = await axios.head(url, {
       timeout: TIMEOUT_MS,
-      headers: LINK_CHECK_HEADERS,
+      headers: { "User-Agent": USER_AGENT },
       maxRedirects: 5,
       validateStatus: () => true,
     });
     if (res.status === 405 || res.status === 501 || res.status >= 400) {
       res = await axios.get(url, {
         timeout: TIMEOUT_MS,
-        headers: LINK_CHECK_HEADERS,
+        headers: { "User-Agent": USER_AGENT },
         maxRedirects: 5,
         validateStatus: () => true,
       });
@@ -117,21 +85,6 @@ async function checkLinkStatusOnce(url) {
   } catch (err) {
     return { url, status: "ERROR", error: err.code || err.message };
   }
-}
-
-async function checkLinkStatus(url) {
-  let result = await checkLinkStatusOnce(url);
-
-  // Retry transient-looking failures (network errors, or status codes that
-  // are often bot-protection rather than a real broken link) before giving up.
-  const isTransient = (r) => r.status === "ERROR" || REVIEW_CODES.includes(r.status);
-
-  for (let i = 0; i < RETRY_DELAYS_MS.length && isTransient(result); i++) {
-    await sleep(RETRY_DELAYS_MS[i]);
-    result = await checkLinkStatusOnce(url);
-  }
-
-  return result;
 }
 
 function toCsvRow(fields) {
@@ -148,23 +101,6 @@ function log(job, line) {
   if (job.log.length > 2000) job.log.shift(); // keep memory bounded
 }
 
-// Per-host concurrency limiter: keeps us from firing a burst of requests at
-// the same domain at once, which is one of the things that trips bot-protection
-// (WAFs like Cloudflare/Akamai often treat bursts from one IP as an attack).
-const hostLimiters = new Map();
-function limiterForHost(url) {
-  let host;
-  try {
-    host = new URL(url).hostname;
-  } catch {
-    host = "unknown";
-  }
-  if (!hostLimiters.has(host)) {
-    hostLimiters.set(host, pLimit(PER_HOST_CONCURRENCY));
-  }
-  return hostLimiters.get(host);
-}
-
 async function processPage(job, pageUrl, csvStream) {
   log(job, `--- Page: ${pageUrl}`);
 
@@ -172,19 +108,19 @@ async function processPage(job, pageUrl, csvStream) {
   try {
     pageRes = await axios.get(pageUrl, {
       timeout: TIMEOUT_MS,
-      headers: PAGE_HEADERS,
+      headers: { "User-Agent": USER_AGENT },
       validateStatus: () => true,
     });
   } catch (err) {
     log(job, `  [FAILED TO FETCH PAGE] ${err.message}`);
-    csvStream.write(toCsvRow([pageUrl, "", "FETCH_FAILED", err.message, "NEEDS_REVIEW"]) + "\n");
-    return { checked: 0, broken: 0, review: 0 };
+    csvStream.write(toCsvRow([pageUrl, "", "FETCH_FAILED", err.message]) + "\n");
+    return { checked: 0, broken: 0 };
   }
 
   if (pageRes.status >= 400) {
     log(job, `  [PAGE RETURNED ${pageRes.status}] skipping link extraction`);
-    csvStream.write(toCsvRow([pageUrl, "", pageRes.status, "source page itself failed", "NEEDS_REVIEW"]) + "\n");
-    return { checked: 0, broken: 0, review: 0 };
+    csvStream.write(toCsvRow([pageUrl, "", pageRes.status, "source page itself failed"]) + "\n");
+    return { checked: 0, broken: 0 };
   }
 
   const $ = cheerio.load(pageRes.data);
@@ -207,48 +143,37 @@ async function processPage(job, pageUrl, csvStream) {
 
   log(job, `  Found ${links.length} links${usedFallback ? " (used body fallback -- content container not found on this page template)" : ""}. Checking...`);
 
-  const overallLimit = pLimit(LINK_CONCURRENCY);
+  const limit = pLimit(LINK_CONCURRENCY);
   let doneCount = 0;
   let brokenCount = 0;
-  let reviewCount = 0;
 
   await Promise.all(
     links.map((l) =>
-      overallLimit(() =>
-        limiterForHost(l)(async () => {
-          const r = await checkLinkStatus(l);
-          doneCount++;
+      limit(async () => {
+        const r = await checkLinkStatus(l);
+        doneCount++;
 
-          const isConfirmedBroken = BROKEN_CODES.includes(r.status);
-          const isNeedsReview = r.status === "ERROR" || REVIEW_CODES.includes(r.status);
-
-          if (isConfirmedBroken) {
-            brokenCount++;
-            log(job, `  [${doneCount}/${links.length}] [BROKEN] [${r.status}] ${r.url}${r.error ? " -- " + r.error : ""}`);
-            csvStream.write(toCsvRow([pageUrl, r.url, r.status, r.error || "", "BROKEN"]) + "\n");
-            job.brokenRows.push({ page: pageUrl, link: r.url, status: r.status, error: r.error || "", confidence: "BROKEN" });
-          } else if (isNeedsReview) {
-            reviewCount++;
-            log(job, `  [${doneCount}/${links.length}] [NEEDS REVIEW] [${r.status}] ${r.url}${r.error ? " -- " + r.error : ""}`);
-            csvStream.write(toCsvRow([pageUrl, r.url, r.status, r.error || "", "NEEDS_REVIEW"]) + "\n");
-            job.brokenRows.push({ page: pageUrl, link: r.url, status: r.status, error: r.error || "", confidence: "NEEDS_REVIEW" });
-          } else {
-            log(job, `  [${doneCount}/${links.length}] [OK] [${r.status}] ${r.url}`);
-          }
-        })
-      )
+        if (r.status === "ERROR" || BROKEN_CODES.includes(r.status)) {
+          brokenCount++;
+          log(job, `  [${doneCount}/${links.length}] [BROKEN] [${r.status}] ${r.url}${r.error ? " -- " + r.error : ""}`);
+          csvStream.write(toCsvRow([pageUrl, r.url, r.status, r.error || ""]) + "\n");
+          job.brokenRows.push({ page: pageUrl, link: r.url, status: r.status, error: r.error || "" });
+        } else {
+          log(job, `  [${doneCount}/${links.length}] [OK] [${r.status}] ${r.url}`);
+        }
+      })
     )
   );
 
-  if (brokenCount === 0 && reviewCount === 0) log(job, `  No issues found on this page.`);
+  if (brokenCount === 0) log(job, `  No broken links on this page.`);
 
-  return { checked: links.length, broken: brokenCount, review: reviewCount };
+  return { checked: links.length, broken: brokenCount };
 }
 
 async function runJob(job) {
   const csvPath = path.join(REPORTS_DIR, `${job.id}.csv`);
   const csvStream = fs.createWriteStream(csvPath, { encoding: "utf-8" });
-  csvStream.write(toCsvRow(["source_page", "broken_link", "status", "error", "confidence"]) + "\n");
+  csvStream.write(toCsvRow(["source_page", "broken_link", "status", "error"]) + "\n");
 
   job.status = "running";
   job.csvPath = csvPath;
@@ -257,10 +182,9 @@ async function runJob(job) {
   await Promise.all(
     job.urls.map((pageUrl) =>
       pageLimit(async () => {
-        const { checked, broken, review } = await processPage(job, pageUrl, csvStream);
+        const { checked, broken } = await processPage(job, pageUrl, csvStream);
         job.totalChecked += checked;
         job.totalBroken += broken;
-        job.totalReview += review;
         job.donePages++;
       })
     )
@@ -268,11 +192,7 @@ async function runJob(job) {
 
   csvStream.end();
   job.status = "done";
-  log(
-    job,
-    `\n=== DONE === ${job.donePages}/${job.urls.length} pages, ${job.totalChecked} links checked, ` +
-      `${job.totalBroken} confirmed broken, ${job.totalReview} need manual review (likely bot-protection, not necessarily broken).`
-  );
+  log(job, `\n=== DONE === ${job.donePages}/${job.urls.length} pages, ${job.totalChecked} links checked, ${job.totalBroken} broken found.`);
 }
 
 // ---- Routes ----
@@ -328,7 +248,6 @@ app.post("/api/run", (req, res) => {
     donePages: 0,
     totalChecked: 0,
     totalBroken: 0,
-    totalReview: 0,
     log: [],
     brokenRows: [],
     csvPath: null,
@@ -354,7 +273,6 @@ app.get("/api/status/:jobId", (req, res) => {
     donePages: job.donePages,
     totalChecked: job.totalChecked,
     totalBroken: job.totalBroken,
-    totalReview: job.totalReview,
     log: job.log,
     brokenRows: job.brokenRows,
   });
