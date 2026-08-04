@@ -30,7 +30,22 @@ const LINK_CONCURRENCY = 10;
 const PER_HOST_CONCURRENCY = 2; // avoid bursts to the same domain tripping bot-protection
 const TIMEOUT_MS = 20000;
 const RETRY_DELAYS_MS = [800, 2500]; // retry transient failures before giving up
-const REQUEST_HEADERS = {
+
+// Headers for fetching the source (helpx) pages themselves. Keep this simple
+// and plain -- helpx.adobe.com is behind Akamai bot-protection, and a header
+// set that CLAIMS to be a full modern Chrome browser (without matching
+// Chrome's actual network/TLS fingerprint) can get flagged as suspicious and
+// silently stalled rather than served, which shows up as a timeout.
+const PAGE_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (compatible; BrokenLinkChecker/1.0)",
+};
+
+// Headers used only when checking the DESTINATION links found on those pages
+// (third-party sites like stock.adobe.com, Zendesk help centers, gov/edu
+// portals, etc). Looking more like a real browser here genuinely helps pass
+// basic bot-filtering on many of those sites, and doesn't carry the same risk
+// since we're not relying on this to fetch the actual article content.
+const LINK_CHECK_HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -86,14 +101,14 @@ async function checkLinkStatusOnce(url) {
   try {
     let res = await axios.head(url, {
       timeout: TIMEOUT_MS,
-      headers: REQUEST_HEADERS,
+      headers: LINK_CHECK_HEADERS,
       maxRedirects: 5,
       validateStatus: () => true,
     });
     if (res.status === 405 || res.status === 501 || res.status >= 400) {
       res = await axios.get(url, {
         timeout: TIMEOUT_MS,
-        headers: REQUEST_HEADERS,
+        headers: LINK_CHECK_HEADERS,
         maxRedirects: 5,
         validateStatus: () => true,
       });
@@ -157,7 +172,7 @@ async function processPage(job, pageUrl, csvStream) {
   try {
     pageRes = await axios.get(pageUrl, {
       timeout: TIMEOUT_MS,
-      headers: REQUEST_HEADERS,
+      headers: PAGE_HEADERS,
       validateStatus: () => true,
     });
   } catch (err) {
