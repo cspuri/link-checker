@@ -14,7 +14,6 @@
     --accent: #4f8cff;
     --ok: #3ecf8e;
     --broken: #ff5d5d;
-    --review: #f5b942;
     --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   }
   * { box-sizing: border-box; }
@@ -107,7 +106,7 @@
   .hint { color: var(--muted); font-size: 12px; }
   .stats {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 12px;
   }
   .stat {
@@ -120,7 +119,6 @@
   .stat .num { font-size: 22px; font-weight: 700; font-family: var(--mono); }
   .stat .label { font-size: 11px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
   .stat.broken .num { color: var(--broken); }
-  .stat.review .num { color: var(--review); }
   .stat.ok .num { color: var(--ok); }
   .progress-bar {
     height: 8px;
@@ -169,7 +167,7 @@
 
 <header>
   <h1>Link Checker</h1>
-  <p>Paste helpx page URLs below (one per line). Checks links inside the article content only — excludes the TOC. 404/410 are flagged as <b>confirmed broken</b>; 403/timeouts/etc. are flagged as <b>needs review</b> since many sites block automated checks without actually being down.</p>
+  <p>Paste helpx page URLs below (one per line). Checks links inside the article content only — excludes the TOC.</p>
 </header>
 
 <main>
@@ -199,8 +197,7 @@ https://helpx.adobe.com/illustrator/desktop/new-features/release-notes.html
     <div class="stats" style="margin-top:18px;">
       <div class="stat"><div class="num" id="statPages">0/0</div><div class="label">Pages</div></div>
       <div class="stat"><div class="num" id="statLinks">0</div><div class="label">Links checked</div></div>
-      <div class="stat broken"><div class="num" id="statBroken">0</div><div class="label">Confirmed broken</div></div>
-      <div class="stat review"><div class="num" id="statReview">0</div><div class="label">Needs review</div></div>
+      <div class="stat broken"><div class="num" id="statBroken">0</div><div class="label">Broken found</div></div>
       <div class="stat ok"><div class="num" id="statRate">0%</div><div class="label">Progress</div></div>
     </div>
   </div>
@@ -286,7 +283,6 @@ async function pollStatus() {
   document.getElementById('statPages').textContent = `${job.donePages}/${job.totalPages}`;
   document.getElementById('statLinks').textContent = job.totalChecked;
   document.getElementById('statBroken').textContent = job.totalBroken;
-  document.getElementById('statReview').textContent = job.totalReview;
   document.getElementById('statRate').textContent = pct + '%';
 
   const logEl = document.getElementById('log');
