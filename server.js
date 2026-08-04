@@ -26,10 +26,10 @@ const PORT = process.env.PORT || 3000;
 
 // ---- Crawl config ----
 const PAGE_CONCURRENCY = 8;
-const LINK_CONCURRENCY = 10;
-const PER_HOST_CONCURRENCY = 2; // avoid bursts to the same domain tripping bot-protection
-const TIMEOUT_MS = 20000;
-const RETRY_DELAYS_MS = [800, 2500]; // retry transient failures before giving up
+const LINK_CONCURRENCY = 12;
+const PER_HOST_CONCURRENCY = 4; // avoid extreme bursts to one domain, but don't over-throttle
+const TIMEOUT_MS = 12000;
+const RETRY_DELAYS_MS = []; // no retries -- if a site blocks bots, retrying just re-triggers the same block, slower for no benefit
 
 // Headers for fetching the source (helpx) pages themselves. Keep this simple
 // and plain -- helpx.adobe.com is behind Akamai bot-protection, and a header
@@ -208,28 +208,37 @@ async function processPage(job, pageUrl, csvStream) {
   log(job, `  Found ${links.length} links${usedFallback ? " (used body fallback -- content container not found on this page template)" : ""}. Checking...`);
 
   const overallLimit = pLimit(LINK_CONCURRENCY);
-  const results = await Promise.all(
-    links.map((l) => overallLimit(() => limiterForHost(l)(() => checkLinkStatus(l))))
-  );
-
+  let doneCount = 0;
   let brokenCount = 0;
   let reviewCount = 0;
-  for (const r of results) {
-    const isConfirmedBroken = BROKEN_CODES.includes(r.status);
-    const isNeedsReview = r.status === "ERROR" || REVIEW_CODES.includes(r.status);
 
-    if (isConfirmedBroken) {
-      brokenCount++;
-      log(job, `  [BROKEN] [${r.status}] ${r.url}${r.error ? " -- " + r.error : ""}`);
-      csvStream.write(toCsvRow([pageUrl, r.url, r.status, r.error || "", "BROKEN"]) + "\n");
-      job.brokenRows.push({ page: pageUrl, link: r.url, status: r.status, error: r.error || "", confidence: "BROKEN" });
-    } else if (isNeedsReview) {
-      reviewCount++;
-      log(job, `  [NEEDS REVIEW] [${r.status}] ${r.url}${r.error ? " -- " + r.error : ""} (may be bot-protection, not necessarily broken)`);
-      csvStream.write(toCsvRow([pageUrl, r.url, r.status, r.error || "", "NEEDS_REVIEW"]) + "\n");
-      job.brokenRows.push({ page: pageUrl, link: r.url, status: r.status, error: r.error || "", confidence: "NEEDS_REVIEW" });
-    }
-  }
+  await Promise.all(
+    links.map((l) =>
+      overallLimit(() =>
+        limiterForHost(l)(async () => {
+          const r = await checkLinkStatus(l);
+          doneCount++;
+
+          const isConfirmedBroken = BROKEN_CODES.includes(r.status);
+          const isNeedsReview = r.status === "ERROR" || REVIEW_CODES.includes(r.status);
+
+          if (isConfirmedBroken) {
+            brokenCount++;
+            log(job, `  [${doneCount}/${links.length}] [BROKEN] [${r.status}] ${r.url}${r.error ? " -- " + r.error : ""}`);
+            csvStream.write(toCsvRow([pageUrl, r.url, r.status, r.error || "", "BROKEN"]) + "\n");
+            job.brokenRows.push({ page: pageUrl, link: r.url, status: r.status, error: r.error || "", confidence: "BROKEN" });
+          } else if (isNeedsReview) {
+            reviewCount++;
+            log(job, `  [${doneCount}/${links.length}] [NEEDS REVIEW] [${r.status}] ${r.url}${r.error ? " -- " + r.error : ""}`);
+            csvStream.write(toCsvRow([pageUrl, r.url, r.status, r.error || "", "NEEDS_REVIEW"]) + "\n");
+            job.brokenRows.push({ page: pageUrl, link: r.url, status: r.status, error: r.error || "", confidence: "NEEDS_REVIEW" });
+          } else {
+            log(job, `  [${doneCount}/${links.length}] [OK] [${r.status}] ${r.url}`);
+          }
+        })
+      )
+    )
+  );
 
   if (brokenCount === 0 && reviewCount === 0) log(job, `  No issues found on this page.`);
 
@@ -268,6 +277,18 @@ async function runJob(job) {
 
 // ---- Routes ----
 
+app.post("/api/reset", (req, res) => {
+  let cleared = 0;
+  for (const job of jobs.values()) {
+    if (job.status === "running" || job.status === "queued") {
+      job.status = "error";
+      log(job, "\n[Manually reset by user]");
+      cleared++;
+    }
+  }
+  res.json({ cleared });
+});
+
 app.post("/api/run", (req, res) => {
   const { urls } = req.body || {};
   if (!urls || typeof urls !== "string") {
@@ -284,9 +305,19 @@ app.post("/api/run", (req, res) => {
   }
 
   // Only one job running at a time on this simple internal tool.
+  // Auto-expire anything that's been "running" for too long (stuck/stale)
+  // instead of blocking new runs forever.
+  const STALE_MS = 10 * 60 * 1000; // 10 minutes
+  for (const job of jobs.values()) {
+    if (job.status === "running" && Date.now() - job.startedAt > STALE_MS) {
+      job.status = "error";
+      log(job, "\n[Auto-reset: job exceeded 10 minutes and was assumed stuck]");
+    }
+  }
+
   const alreadyRunning = [...jobs.values()].some((j) => j.status === "running");
   if (alreadyRunning) {
-    return res.status(409).json({ error: "A check is already running. Wait for it to finish." });
+    return res.status(409).json({ error: "A check is already running. Wait for it to finish, or click Reset." });
   }
 
   const id = crypto.randomBytes(6).toString("hex");
