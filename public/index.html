@@ -156,6 +156,7 @@
     text-transform: uppercase;
   }
   .badge.running { background: rgba(79,140,255,0.15); color: var(--accent); }
+  .badge.queued { background: rgba(139,147,167,0.15); color: var(--muted); }
   .badge.done { background: rgba(62,207,142,0.15); color: var(--ok); }
   .badge.error { background: rgba(255,93,93,0.15); color: var(--broken); }
   .status-line { display: flex; align-items: center; gap: 10px; }
@@ -209,8 +210,18 @@ https://helpx.adobe.com/illustrator/desktop/new-features/release-notes.html
 </main>
 
 <script>
-let currentJobId = null;
+let currentJobId = localStorage.getItem('linkCheckerJobId') || null;
 let pollTimer = null;
+
+// If we're reloading a page that already had a check in flight, resume watching it.
+if (currentJobId) {
+  document.getElementById('progressPanel').style.display = 'block';
+  document.getElementById('logPanel').style.display = 'block';
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('runBtn').textContent = 'Checking…';
+  pollTimer = setInterval(pollStatus, 1200);
+  pollStatus();
+}
 
 async function safeJson(res) {
   const text = await res.text();
@@ -250,10 +261,16 @@ async function startRun() {
     }
 
     currentJobId = data.jobId;
+    localStorage.setItem('linkCheckerJobId', currentJobId);
     document.getElementById('progressPanel').style.display = 'block';
     document.getElementById('logPanel').style.display = 'block';
     document.getElementById('downloadBtn').style.display = 'none';
     document.getElementById('log').textContent = '';
+
+    if (data.queuePosition && data.queuePosition > 1) {
+      document.getElementById('progressText').textContent =
+        `Waiting in queue (position ${data.queuePosition}) — someone else's check is running first.`;
+    }
 
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(pollStatus, 1200);
@@ -269,6 +286,18 @@ async function startRun() {
 async function pollStatus() {
   if (!currentJobId) return;
   const res = await fetch('/api/status/' + currentJobId);
+  if (res.status === 404) {
+    // Server doesn't know this job anymore (e.g. redeployed/restarted).
+    clearInterval(pollTimer);
+    localStorage.removeItem('linkCheckerJobId');
+    currentJobId = null;
+    document.getElementById('progressPanel').style.display = 'none';
+    document.getElementById('logPanel').style.display = 'none';
+    const runBtn = document.getElementById('runBtn');
+    runBtn.disabled = false;
+    runBtn.textContent = 'Run check';
+    return;
+  }
   if (!res.ok) return;
   const job = await safeJson(res).catch(() => null);
   if (!job) return;
@@ -277,13 +306,19 @@ async function pollStatus() {
   badge.textContent = job.status;
   badge.className = 'badge ' + job.status;
 
-  const pct = job.totalPages ? Math.round((job.donePages / job.totalPages) * 100) : 0;
-  document.getElementById('progressFill').style.width = pct + '%';
-  document.getElementById('progressText').textContent = `${job.donePages} of ${job.totalPages} pages processed`;
+  if (job.status === 'queued') {
+    document.getElementById('progressText').textContent =
+      `Waiting in queue (position ${job.queuePosition}) — someone else's check is running first.`;
+  } else {
+    const pct = job.totalPages ? Math.round((job.donePages / job.totalPages) * 100) : 0;
+    document.getElementById('progressFill').style.width = pct + '%';
+    document.getElementById('progressText').textContent = `${job.donePages} of ${job.totalPages} pages processed`;
+    document.getElementById('statRate').textContent = pct + '%';
+  }
+
   document.getElementById('statPages').textContent = `${job.donePages}/${job.totalPages}`;
   document.getElementById('statLinks').textContent = job.totalChecked;
   document.getElementById('statBroken').textContent = job.totalBroken;
-  document.getElementById('statRate').textContent = pct + '%';
 
   const logEl = document.getElementById('log');
   logEl.textContent = job.log.join('\n');
@@ -291,6 +326,7 @@ async function pollStatus() {
 
   if (job.status === 'done' || job.status === 'error') {
     clearInterval(pollTimer);
+    localStorage.removeItem('linkCheckerJobId');
     const runBtn = document.getElementById('runBtn');
     runBtn.disabled = false;
     runBtn.textContent = 'Run check';
@@ -306,17 +342,38 @@ function download() {
 }
 
 async function resetJobs() {
+  if (!currentJobId) {
+    const errorEl = document.getElementById('errorMsg');
+    errorEl.textContent = "You don't have an active check running to reset.";
+    errorEl.style.display = 'block';
+    return;
+  }
+
+  const confirmed = confirm("Cancel your current check?");
+  if (!confirmed) return;
+
   const resetBtn = document.getElementById('resetBtn');
   resetBtn.disabled = true;
   resetBtn.textContent = 'Resetting…';
   try {
-    const res = await fetch('/api/reset', { method: 'POST' });
-    await safeJson(res);
+    const res = await fetch('/api/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId: currentJobId }),
+    });
+    const data = await safeJson(res);
     if (pollTimer) clearInterval(pollTimer);
     const runBtn = document.getElementById('runBtn');
     runBtn.disabled = false;
     runBtn.textContent = 'Run check';
-    document.getElementById('errorMsg').style.display = 'none';
+
+    const errorEl = document.getElementById('errorMsg');
+    if (data.cleared) {
+      errorEl.style.display = 'none';
+    } else if (data.message) {
+      errorEl.textContent = data.message;
+      errorEl.style.display = 'block';
+    }
   } catch (err) {
     const errorEl = document.getElementById('errorMsg');
     errorEl.textContent = 'Reset failed: ' + err.message;
