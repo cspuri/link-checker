@@ -351,6 +351,7 @@ async function resetJobs() {
   localStorage.removeItem('linkCheckerJobId');
   if (pollTimer) clearInterval(pollTimer);
 
+  document.getElementById('urls').value = '';
   document.getElementById('progressPanel').style.display = 'none';
   document.getElementById('logPanel').style.display = 'none';
   document.getElementById('log').textContent = '';
