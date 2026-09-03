@@ -195,18 +195,74 @@ async function runJob(job) {
   log(job, `\n=== DONE === ${job.donePages}/${job.urls.length} pages, ${job.totalChecked} links checked, ${job.totalBroken} broken found.`);
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ---- Simple FIFO queue: only one job actually runs at a time (keeps this
+// small internal tool light on resources), but submissions queue up instead
+// of getting rejected with an error. ----
+let queueRunning = false;
+
+async function processQueue() {
+  if (queueRunning) return;
+  queueRunning = true;
+  while (true) {
+    const next = [...jobs.values()]
+      .filter((j) => j.status === "queued")
+      .sort((a, b) => a.startedAt - b.startedAt)[0];
+    if (!next) break;
+
+    const runPromise = runJob(next).catch((err) => {
+      next.status = "error";
+      log(next, `Fatal error: ${err.message}`);
+    });
+
+    // Move on to the next queued person as soon as EITHER the job finishes
+    // naturally, OR someone resets it -- rather than always waiting for the
+    // job's own network calls to fully settle (which could take a while if
+    // something's genuinely stuck). If reset while still in flight, the old
+    // job's requests keep running harmlessly in the background and just get
+    // ignored once they finish.
+    while (next.status === "running" || next.status === "queued") {
+      const finishedNaturally = await Promise.race([
+        runPromise.then(() => true),
+        sleep(500).then(() => false),
+      ]);
+      if (finishedNaturally) break;
+    }
+  }
+  queueRunning = false;
+}
+
+function queuePositionFor(job) {
+  if (job.status !== "queued") return 0;
+  return [...jobs.values()].filter(
+    (j) => j.status === "queued" && j.startedAt <= job.startedAt
+  ).length;
+}
+
 // ---- Routes ----
 
 app.post("/api/reset", (req, res) => {
-  let cleared = 0;
-  for (const job of jobs.values()) {
-    if (job.status === "running" || job.status === "queued") {
-      job.status = "error";
-      log(job, "\n[Manually reset by user]");
-      cleared++;
-    }
+  const { jobId } = req.body || {};
+
+  if (!jobId) {
+    return res.json({ cleared: 0, message: "No active check found for you to reset." });
   }
-  res.json({ cleared });
+
+  const job = jobs.get(jobId);
+  if (!job) {
+    return res.json({ cleared: 0, message: "That check no longer exists (maybe it already finished)." });
+  }
+
+  if (job.status === "running" || job.status === "queued") {
+    job.status = "error";
+    log(job, "\n[Reset by the person who started this check]");
+    return res.json({ cleared: 1 });
+  }
+
+  return res.json({ cleared: 0, message: "That check has already finished -- nothing to reset." });
 });
 
 app.post("/api/run", (req, res) => {
@@ -224,22 +280,6 @@ app.post("/api/run", (req, res) => {
     return res.status(400).json({ error: "No valid URLs found." });
   }
 
-  // Only one job running at a time on this simple internal tool.
-  // Auto-expire anything that's been "running" for too long (stuck/stale)
-  // instead of blocking new runs forever.
-  const STALE_MS = 10 * 60 * 1000; // 10 minutes
-  for (const job of jobs.values()) {
-    if (job.status === "running" && Date.now() - job.startedAt > STALE_MS) {
-      job.status = "error";
-      log(job, "\n[Auto-reset: job exceeded 10 minutes and was assumed stuck]");
-    }
-  }
-
-  const alreadyRunning = [...jobs.values()].some((j) => j.status === "running");
-  if (alreadyRunning) {
-    return res.status(409).json({ error: "A check is already running. Wait for it to finish, or click Reset." });
-  }
-
   const id = crypto.randomBytes(6).toString("hex");
   const job = {
     id,
@@ -255,12 +295,9 @@ app.post("/api/run", (req, res) => {
   };
   jobs.set(id, job);
 
-  runJob(job).catch((err) => {
-    job.status = "error";
-    log(job, `Fatal error: ${err.message}`);
-  });
+  processQueue(); // fire and forget -- kicks off the queue if idle
 
-  res.json({ jobId: id });
+  res.json({ jobId: id, queuePosition: queuePositionFor(job) });
 });
 
 app.get("/api/status/:jobId", (req, res) => {
@@ -269,6 +306,7 @@ app.get("/api/status/:jobId", (req, res) => {
   res.json({
     id: job.id,
     status: job.status,
+    queuePosition: queuePositionFor(job),
     totalPages: job.urls.length,
     donePages: job.donePages,
     totalChecked: job.totalChecked,
