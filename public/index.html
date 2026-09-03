@@ -342,45 +342,38 @@ function download() {
 }
 
 async function resetJobs() {
-  if (!currentJobId) {
-    const errorEl = document.getElementById('errorMsg');
-    errorEl.textContent = "You don't have an active check running to reset.";
-    errorEl.style.display = 'block';
-    return;
-  }
+  const jobIdToReset = currentJobId;
 
-  const confirmed = confirm("Cancel your current check?");
-  if (!confirmed) return;
+  // Reset the UI immediately -- don't wait on the network, don't ask for
+  // confirmation, don't show any message. It should just feel like a fresh
+  // launch of the tool.
+  currentJobId = null;
+  localStorage.removeItem('linkCheckerJobId');
+  if (pollTimer) clearInterval(pollTimer);
 
-  const resetBtn = document.getElementById('resetBtn');
-  resetBtn.disabled = true;
-  resetBtn.textContent = 'Resetting…';
-  try {
-    const res = await fetch('/api/reset', {
+  document.getElementById('progressPanel').style.display = 'none';
+  document.getElementById('logPanel').style.display = 'none';
+  document.getElementById('log').textContent = '';
+  document.getElementById('downloadBtn').style.display = 'none';
+  document.getElementById('errorMsg').style.display = 'none';
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('statPages').textContent = '0/0';
+  document.getElementById('statLinks').textContent = '0';
+  document.getElementById('statBroken').textContent = '0';
+  document.getElementById('statRate').textContent = '0%';
+
+  const runBtn = document.getElementById('runBtn');
+  runBtn.disabled = false;
+  runBtn.textContent = 'Run check';
+
+  // Quietly tell the server to cancel your job (if you had one) so the
+  // queue frees up for whoever's next -- but don't surface the result.
+  if (jobIdToReset) {
+    fetch('/api/reset', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId: currentJobId }),
-    });
-    const data = await safeJson(res);
-    if (pollTimer) clearInterval(pollTimer);
-    const runBtn = document.getElementById('runBtn');
-    runBtn.disabled = false;
-    runBtn.textContent = 'Run check';
-
-    const errorEl = document.getElementById('errorMsg');
-    if (data.cleared) {
-      errorEl.style.display = 'none';
-    } else if (data.message) {
-      errorEl.textContent = data.message;
-      errorEl.style.display = 'block';
-    }
-  } catch (err) {
-    const errorEl = document.getElementById('errorMsg');
-    errorEl.textContent = 'Reset failed: ' + err.message;
-    errorEl.style.display = 'block';
-  } finally {
-    resetBtn.disabled = false;
-    resetBtn.textContent = 'Reset';
+      body: JSON.stringify({ jobId: jobIdToReset }),
+    }).catch(() => {});
   }
 }
 </script>
