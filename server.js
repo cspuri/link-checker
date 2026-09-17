@@ -27,7 +27,7 @@ const PORT = process.env.PORT || 3000;
 // ---- Crawl config (kept simple and fast -- no retries, no per-host throttling) ----
 const PAGE_CONCURRENCY = 8;
 const LINK_CONCURRENCY = 12;
-const TIMEOUT_MS = 15000;
+const TIMEOUT_MS = 20000;
 const USER_AGENT = "Mozilla/5.0 (compatible; BrokenLinkChecker/1.0)";
 
 // Anything in this list of status codes (or a network-level ERROR) is
@@ -45,10 +45,6 @@ const EXCLUDE_SELECTORS = [
   ".globalnavfooter",
   ".flex_top_nav",
 ];
-
-// Safety cap: a single product's TOC can easily run 150-300+ pages. This
-// stops "check the TOC" from silently turning into an unbounded crawl.
-const MAX_TOC_EXPANSION = 400;
 
 // ---- In-memory job store (single-process, fine for a small internal tool) ----
 const jobs = new Map(); // jobId -> job state
@@ -220,11 +216,6 @@ async function runJob(job) {
     const master = new Set(job.urls);
 
     for (const seedUrl of job.urls) {
-      if (master.size >= MAX_TOC_EXPANSION) {
-        log(job, `\n[TOC expansion] Reached the cap of ${MAX_TOC_EXPANSION} pages -- stopping expansion here.`);
-        break;
-      }
-
       log(job, `\n[TOC expansion] Reading TOC from: ${seedUrl}`);
       let discovered;
       try {
@@ -236,7 +227,6 @@ async function runJob(job) {
 
       let added = 0;
       for (const link of discovered) {
-        if (master.size >= MAX_TOC_EXPANSION) break;
         if (!master.has(link)) {
           master.add(link);
           added++;
