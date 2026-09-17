@@ -36,6 +36,7 @@ const BROKEN_CODES = [400, 401, 403, 404, 405, 410, 500, 502, 503, 504];
 
 // Confirmed from actual helpx.adobe.com page markup.
 const CONTENT_SELECTOR = "#helpxNext-article-right-rail";
+const TOC_SELECTOR = "#helpxNext-article-left-rail";
 const EXCLUDE_SELECTORS = [
   "#helpxNext-article-left-rail",
   ".tocmobile",
@@ -44,6 +45,10 @@ const EXCLUDE_SELECTORS = [
   ".globalnavfooter",
   ".flex_top_nav",
 ];
+
+// Safety cap: a single product's TOC can easily run 150-300+ pages. This
+// stops "check the TOC" from silently turning into an unbounded crawl.
+const MAX_TOC_EXPANSION = 400;
 
 // ---- In-memory job store (single-process, fine for a small internal tool) ----
 const jobs = new Map(); // jobId -> job state
@@ -99,6 +104,34 @@ function toCsvRow(fields) {
 function log(job, line) {
   job.log.push(line);
   if (job.log.length > 2000) job.log.shift(); // keep memory bounded
+}
+
+// Pulls every real article link out of a page's left-rail TOC.
+// Category headers (e.g. "Get started") are <span> toggles, not <a> tags,
+// so a plain a[href] selector naturally only picks up actual destination
+// pages -- no extra filtering needed there. Throws if the page couldn't be
+// fetched or has no TOC at all (e.g. a landing/hub page using a different
+// template).
+async function expandTocForUrl(seedUrl) {
+  const res = await axios.get(seedUrl, {
+    timeout: TIMEOUT_MS,
+    headers: { "User-Agent": USER_AGENT },
+    validateStatus: () => true,
+  });
+  if (res.status >= 400) {
+    throw new Error(`page returned ${res.status}`);
+  }
+
+  const $ = cheerio.load(res.data);
+  let tocScope = $(TOC_SELECTOR);
+  if (tocScope.length === 0) tocScope = $(".tocmobile");
+  if (tocScope.length === 0) {
+    throw new Error("no TOC found on this page (it may not use the article template)");
+  }
+
+  const hrefs = [];
+  tocScope.find("a[href]").each((_, el) => hrefs.push($(el).attr("href")));
+  return [...new Set(hrefs.map((h) => resolveUrl(seedUrl, h)).filter(isCheckableLink))];
 }
 
 async function processPage(job, pageUrl, csvStream) {
@@ -178,9 +211,48 @@ async function runJob(job) {
   job.status = "running";
   job.csvPath = csvPath;
 
+  let pagesToCheck = job.urls;
+
+  if (job.expandToc) {
+    // "Already discovered = never re-expand" -- this is what prevents a
+    // loop: every page on a product's TOC lists the SAME TOC, so we only
+    // ever expand the original seed URL, never pages found through it.
+    const master = new Set(job.urls);
+
+    for (const seedUrl of job.urls) {
+      if (master.size >= MAX_TOC_EXPANSION) {
+        log(job, `\n[TOC expansion] Reached the cap of ${MAX_TOC_EXPANSION} pages -- stopping expansion here.`);
+        break;
+      }
+
+      log(job, `\n[TOC expansion] Reading TOC from: ${seedUrl}`);
+      let discovered;
+      try {
+        discovered = await expandTocForUrl(seedUrl);
+      } catch (err) {
+        log(job, `  [TOC expansion FAILED] ${err.message}`);
+        continue;
+      }
+
+      let added = 0;
+      for (const link of discovered) {
+        if (master.size >= MAX_TOC_EXPANSION) break;
+        if (!master.has(link)) {
+          master.add(link);
+          added++;
+        }
+      }
+      log(job, `  Found ${discovered.length} pages listed in this TOC (${added} new).`);
+    }
+
+    pagesToCheck = [...master];
+    job.urls = pagesToCheck; // so /api/status reports the real total, not just the seed count
+    log(job, `\n[TOC expansion] Total pages to check this run: ${pagesToCheck.length}\n`);
+  }
+
   const pageLimit = pLimit(PAGE_CONCURRENCY);
   await Promise.all(
-    job.urls.map((pageUrl) =>
+    pagesToCheck.map((pageUrl) =>
       pageLimit(async () => {
         const { checked, broken } = await processPage(job, pageUrl, csvStream);
         job.totalChecked += checked;
@@ -192,7 +264,7 @@ async function runJob(job) {
 
   csvStream.end();
   job.status = "done";
-  log(job, `\n=== DONE === ${job.donePages}/${job.urls.length} pages, ${job.totalChecked} links checked, ${job.totalBroken} broken found.`);
+  log(job, `\n=== DONE === ${job.donePages}/${pagesToCheck.length} pages, ${job.totalChecked} links checked, ${job.totalBroken} broken found.`);
 }
 
 function sleep(ms) {
@@ -266,7 +338,7 @@ app.post("/api/reset", (req, res) => {
 });
 
 app.post("/api/run", (req, res) => {
-  const { urls } = req.body || {};
+  const { urls, expandToc } = req.body || {};
   if (!urls || typeof urls !== "string") {
     return res.status(400).json({ error: "Provide 'urls' as a newline-separated string." });
   }
@@ -280,11 +352,18 @@ app.post("/api/run", (req, res) => {
     return res.status(400).json({ error: "No valid URLs found." });
   }
 
+  if (expandToc && urlList.length > 1) {
+    return res.status(400).json({
+      error: "TOC expansion only works with one URL at a time -- remove the extra lines or uncheck the box.",
+    });
+  }
+
   const id = crypto.randomBytes(6).toString("hex");
   const job = {
     id,
     status: "queued",
     urls: urlList,
+    expandToc: !!expandToc,
     donePages: 0,
     totalChecked: 0,
     totalBroken: 0,
