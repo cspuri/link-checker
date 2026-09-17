@@ -185,6 +185,12 @@ https://helpx.adobe.com/illustrator/desktop/new-features/release-notes.html
         <button id="resetBtn" class="secondary" onclick="resetJobs()">Reset</button>
       </div>
     </div>
+    <div class="row" style="margin-top:10px;">
+      <label class="hint" style="display:flex; align-items:center; gap:8px; margin-bottom:0; cursor:pointer;">
+        <input type="checkbox" id="expandToc" style="width:16px; height:16px; cursor:pointer;" />
+        Also check every page listed in the TOC of the URL above (works with exactly one URL at a time -- can expand to 100+ pages)
+      </label>
+    </div>
     <div id="errorMsg"></div>
   </div>
 
@@ -237,8 +243,17 @@ async function safeJson(res) {
 
 async function startRun() {
   const urls = document.getElementById('urls').value;
+  const expandToc = document.getElementById('expandToc').checked;
   const errorEl = document.getElementById('errorMsg');
   errorEl.style.display = 'none';
+
+  const urlLines = urls.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+
+  if (expandToc && urlLines.length > 1) {
+    errorEl.textContent = "TOC expansion only works with one URL at a time — remove the extra lines or uncheck the box.";
+    errorEl.style.display = 'block';
+    return;
+  }
 
   const runBtn = document.getElementById('runBtn');
   runBtn.disabled = true;
@@ -248,7 +263,7 @@ async function startRun() {
     const res = await fetch('/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls })
+      body: JSON.stringify({ urls, expandToc })
     });
     const data = await safeJson(res);
 
@@ -352,6 +367,7 @@ async function resetJobs() {
   if (pollTimer) clearInterval(pollTimer);
 
   document.getElementById('urls').value = '';
+  document.getElementById('expandToc').checked = false;
   document.getElementById('progressPanel').style.display = 'none';
   document.getElementById('logPanel').style.display = 'none';
   document.getElementById('log').textContent = '';
